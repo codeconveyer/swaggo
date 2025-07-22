@@ -122,6 +122,9 @@ type Parser struct {
 	// outputSchemas store schemas which will be export to swagger
 	outputSchemas map[*TypeSpecDef]*Schema
 
+	// outputExBodyProperties store body properties which will be export to swagger but not in body
+	outputExBodyProperties map[*ast.File]map[string]spec.SchemaProperties
+
 	// PropNamingStrategy naming strategy
 	PropNamingStrategy string
 
@@ -232,14 +235,15 @@ func New(options ...func(*Parser)) *Parser {
 				Extensions: nil,
 			},
 		},
-		packages:           NewPackagesDefinitions(),
-		debug:              log.New(os.Stdout, "", log.LstdFlags),
-		parsedSchemas:      make(map[*TypeSpecDef]*Schema),
-		outputSchemas:      make(map[*TypeSpecDef]*Schema),
-		excludes:           make(map[string]struct{}),
-		tags:               make(map[string]struct{}),
-		fieldParserFactory: newTagBaseFieldParser,
-		Overrides:          make(map[string]string),
+		packages:               NewPackagesDefinitions(),
+		debug:                  log.New(os.Stdout, "", log.LstdFlags),
+		parsedSchemas:          make(map[*TypeSpecDef]*Schema),
+		outputSchemas:          make(map[*TypeSpecDef]*Schema),
+		outputExBodyProperties: make(map[*ast.File]map[string]spec.SchemaProperties),
+		excludes:               make(map[string]struct{}),
+		tags:                   make(map[string]struct{}),
+		fieldParserFactory:     newTagBaseFieldParser,
+		Overrides:              make(map[string]string),
 	}
 
 	for _, option := range options {
@@ -473,7 +477,12 @@ func getPkgName(searchDir string) (string, error) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("execute go list command, %s, stdout:%s, stderr:%s", err, stdout.String(), stderr.String())
+		return "", fmt.Errorf(
+			"execute go list command, %s, stdout:%s, stderr:%s",
+			err,
+			stdout.String(),
+			stderr.String(),
+		)
 	}
 
 	outStr, _ := stdout.String(), stderr.String()
@@ -577,11 +586,13 @@ func parseGeneralAPIInfo(parser *Parser, comments []string) error {
 			parser.swagger.Schemes = strings.Split(value, " ")
 		case "@tag.name":
 			if parser.matchTag(value) {
-				parser.swagger.Tags = append(parser.swagger.Tags, spec.Tag{
-					TagProps: spec.TagProps{
-						Name: value,
+				parser.swagger.Tags = append(
+					parser.swagger.Tags, spec.Tag{
+						TagProps: spec.TagProps{
+							Name: value,
+						},
 					},
-				})
+				)
 				tag = &parser.swagger.Tags[len(parser.swagger.Tags)-1]
 			} else {
 				tag = nil
@@ -1106,11 +1117,17 @@ func (parser *Parser) ParseRouterAPIInfo(fileInfo *AstFileInfo) error {
 func (parser *Parser) parseRouterAPIInfoComment(comments []*ast.Comment, fileInfo *AstFileInfo) error {
 	if parser.matchTags(comments) && matchExtension(parser.parseExtension, comments) {
 		// for per 'function' comment, create a new 'Operation' object
+		fmt.Println(fileInfo.Path)
 		operation := NewOperation(parser, SetCodeExampleFilesDirectory(parser.codeExampleFilesDir))
 		for _, comment := range comments {
 			err := operation.ParseComment(comment.Text, fileInfo.File)
 			if err != nil {
-				return fmt.Errorf("ParseComment error in file %s for comment: '%s': %+v", fileInfo.Path, comment.Text, err)
+				return fmt.Errorf(
+					"ParseComment error in file %s for comment: '%s': %+v",
+					fileInfo.Path,
+					comment.Text,
+					err,
+				)
 			}
 			if operation.State != "" && operation.State != parser.HostState {
 				return nil
@@ -1162,7 +1179,11 @@ func processRouterOperation(parser *Parser, operation *Operation) error {
 
 		// check if we already have an operation for this path and method
 		if *op != nil {
-			err := fmt.Errorf("route %s %s is declared multiple times", routeProperties.HTTPMethod, routeProperties.Path)
+			err := fmt.Errorf(
+				"route %s %s is declared multiple times",
+				routeProperties.HTTPMethod,
+				routeProperties.Path,
+			)
 			if parser.Strict {
 				return err
 			}
@@ -1261,7 +1282,7 @@ func (parser *Parser) getTypeSchema(typeName string, file *ast.File, ref bool) (
 
 		schema, err = parser.ParseDefinition(typeSpecDef)
 		if err != nil {
-			if err == ErrRecursiveParseStruct && ref {
+			if errors.Is(err, ErrRecursiveParseStruct) && ref {
 				return parser.getRefTypeSchema(typeSpecDef, schema), nil
 			}
 			return nil, fmt.Errorf("%s: %w", typeName, err)
@@ -1286,7 +1307,28 @@ func (parser *Parser) getRefTypeSchema(typeSpecDef *TypeSpecDef, schema *Schema)
 		parser.swagger.Definitions[schema.Name] = spec.Schema{}
 
 		if schema.Schema != nil {
-			parser.swagger.Definitions[schema.Name] = *schema.Schema
+			newSchema := *schema.Schema
+			properties := make(spec.SchemaProperties, len(newSchema.Properties))
+			exProperties := make(map[string]spec.SchemaProperties)
+			for s, p := range newSchema.Properties {
+				b := false
+				for extra := range p.Extensions {
+					if extra == headerTag || extra == queryTag {
+						b = true
+						if exProperties[extra] == nil {
+							exProperties[extra] = make(spec.SchemaProperties, 1)
+						}
+						exProperties[extra][s] = p
+						break
+					}
+				}
+				if !b {
+					properties[s] = p
+				}
+			}
+			newSchema.Properties = properties
+			parser.outputExBodyProperties[typeSpecDef.File] = exProperties
+			parser.swagger.Definitions[schema.Name] = newSchema
 		}
 
 		parser.outputSchemas[typeSpecDef] = schema
@@ -1397,7 +1439,11 @@ func fullTypeName(parts ...string) string {
 
 // fillDefinitionDescription additionally fills fields in definition (spec.Schema)
 // TODO: If .go file contains many types, it may work for a long time
-func (parser *Parser) fillDefinitionDescription(definition *spec.Schema, file *ast.File, typeSpecDef *TypeSpecDef) (err error) {
+func (parser *Parser) fillDefinitionDescription(
+	definition *spec.Schema,
+	file *ast.File,
+	typeSpecDef *TypeSpecDef,
+) (err error) {
 	if file == nil {
 		return
 	}
@@ -1428,7 +1474,10 @@ func (parser *Parser) fillDefinitionDescription(definition *spec.Schema, file *a
 
 // extractDeclarationDescription gets first description
 // from attribute descriptionAttr in commentGroups (ast.CommentGroup)
-func (parser *Parser) extractDeclarationDescription(typeName string, commentGroups ...*ast.CommentGroup) (string, error) {
+func (parser *Parser) extractDeclarationDescription(typeName string, commentGroups ...*ast.CommentGroup) (
+	string,
+	error,
+) {
 	var description string
 
 	for _, commentGroup := range commentGroups {
@@ -1646,11 +1695,14 @@ func (parser *Parser) parseStructField(file *ast.File, field *ast.Field) (map[st
 		tagRequired = append(tagRequired, fieldNames...)
 	}
 
-	if formName := ps.FormName(); len(formName) > 0 {
+	if formName := ps.FormName(); formName != "" {
 		schema.AddExtension("formData", formName)
 	}
-	if headerName := ps.HeaderName(); len(headerName) > 0 {
+	if headerName := ps.HeaderName(); headerName != "" {
 		schema.AddExtension("header", headerName)
+	}
+	if queryName := ps.FirstTagValue(queryTag); queryName != "" {
+		schema.AddExtension("query", queryName)
 	}
 	if pathName := ps.PathName(); len(pathName) > 0 {
 		schema.AddExtension("path", pathName)
@@ -1826,23 +1878,30 @@ func (parser *Parser) getAllGoFileInfo(packageDir, searchDir string) error {
 	if parser.skipPackageByPrefix(packageDir) {
 		return nil // ignored by user-defined package path prefixes
 	}
-	return filepath.Walk(searchDir, func(path string, f os.FileInfo, _ error) error {
-		err := parser.Skip(path, f)
-		if err != nil {
-			return err
-		}
+	return filepath.Walk(
+		searchDir, func(path string, f os.FileInfo, _ error) error {
+			err := parser.Skip(path, f)
+			if err != nil {
+				return err
+			}
 
-		if f.IsDir() {
-			return nil
-		}
+			if f.IsDir() {
+				return nil
+			}
 
-		relPath, err := filepath.Rel(searchDir, path)
-		if err != nil {
-			return err
-		}
+			relPath, err := filepath.Rel(searchDir, path)
+			if err != nil {
+				return err
+			}
 
-		return parser.parseFile(filepath.ToSlash(filepath.Dir(filepath.Clean(filepath.Join(packageDir, relPath)))), path, nil, ParseAll)
-	})
+			return parser.parseFile(
+				filepath.ToSlash(filepath.Dir(filepath.Clean(filepath.Join(packageDir, relPath)))),
+				path,
+				nil,
+				ParseAll,
+			)
+		},
+	)
 }
 
 func (parser *Parser) getAllGoFileInfoFromDeps(pkg *depth.Pkg, parseFlag ParseFlag) error {
@@ -1921,7 +1980,8 @@ func (parser *Parser) checkOperationIDUniqueness() error {
 		if ok {
 			return fmt.Errorf(
 				"duplicated @id annotation '%s' found in '%s', previously declared in: '%s'",
-				id, current, previous)
+				id, current, previous,
+			)
 		}
 
 		operationsIds[id] = current

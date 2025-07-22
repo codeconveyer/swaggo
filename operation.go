@@ -285,7 +285,17 @@ func (operation *Operation) ParseParamComment(commentLine string, astFile *ast.F
 	required := requiredText == "true" || requiredText == requiredLabel
 	description := strings.Join(strings.Split(matches[5], "\\n"), "\n")
 
-	param := createParameter(paramType, description, name, objectType, refType, format, required, enums, operation.parser.collectionFormatInQuery)
+	param := createParameter(
+		paramType,
+		description,
+		name,
+		objectType,
+		refType,
+		format,
+		required,
+		enums,
+		operation.parser.collectionFormatInQuery,
+	)
 
 	switch paramType {
 	case "path", "header", "query", "formData":
@@ -305,79 +315,7 @@ func (operation *Operation) ParseParamComment(commentLine string, astFile *ast.F
 			if len(schema.Properties) == 0 {
 				return nil
 			}
-
-			items := schema.Properties.ToOrderedSchemaItems()
-
-			for _, item := range items {
-				name, prop := item.Name, &item.Schema
-				if len(prop.Type) == 0 {
-					prop = operation.parser.getUnderlyingSchema(prop)
-					if len(prop.Type) == 0 {
-						continue
-					}
-				}
-
-				nameOverrideType := paramType
-				// query also uses formData tags
-				if paramType == "query" {
-					nameOverrideType = "formData"
-				}
-				// load overridden type specific name from extensions if exists
-				if nameVal, ok := item.Schema.Extensions.GetString(nameOverrideType); ok {
-					name = nameVal
-				}
-
-				switch {
-				case prop.Type[0] == ARRAY:
-					if prop.Items.Schema == nil {
-						continue
-					}
-					itemSchema := prop.Items.Schema
-					if len(itemSchema.Type) == 0 {
-						itemSchema = operation.parser.getUnderlyingSchema(prop.Items.Schema)
-					}
-					if itemSchema == nil {
-						continue
-					}
-					if len(itemSchema.Type) == 0 {
-						continue
-					}
-					if !IsSimplePrimitiveType(itemSchema.Type[0]) {
-						continue
-					}
-					collectionFormat := operation.parser.collectionFormatInQuery
-					if cfv, ok := prop.Extensions.GetString(collectionFormatTag); ok {
-						collectionFormat = cfv
-					}
-					param = createParameter(paramType, prop.Description, name, prop.Type[0], itemSchema.Type[0], format, findInSlice(schema.Required, item.Name), itemSchema.Enum, collectionFormat)
-
-				case IsSimplePrimitiveType(prop.Type[0]):
-					param = createParameter(paramType, prop.Description, name, PRIMITIVE, prop.Type[0], format, findInSlice(schema.Required, item.Name), nil, operation.parser.collectionFormatInQuery)
-				default:
-					operation.parser.debug.Printf("skip field [%s] in %s is not supported type for %s", name, refType, paramType)
-					continue
-				}
-
-				param.Nullable = prop.Nullable
-				param.Format = prop.Format
-				param.Default = prop.Default
-				param.Example = prop.Example
-				param.Extensions = prop.Extensions
-				param.CommonValidations.Maximum = prop.Maximum
-				param.CommonValidations.Minimum = prop.Minimum
-				param.CommonValidations.ExclusiveMaximum = prop.ExclusiveMaximum
-				param.CommonValidations.ExclusiveMinimum = prop.ExclusiveMinimum
-				param.CommonValidations.MaxLength = prop.MaxLength
-				param.CommonValidations.MinLength = prop.MinLength
-				param.CommonValidations.Pattern = prop.Pattern
-				param.CommonValidations.MaxItems = prop.MaxItems
-				param.CommonValidations.MinItems = prop.MinItems
-				param.CommonValidations.UniqueItems = prop.UniqueItems
-				param.CommonValidations.MultipleOf = prop.MultipleOf
-				param.CommonValidations.Enum = prop.Enum
-				operation.Operation.Parameters = append(operation.Operation.Parameters, param)
-			}
-
+			operation.parseProperties4object(schema, paramType, refType, format)
 			return nil
 		}
 	case "body":
@@ -388,7 +326,18 @@ func (operation *Operation) ParseParamComment(commentLine string, astFile *ast.F
 			if err != nil {
 				return err
 			}
-
+			if ex, ok := operation.parser.outputExBodyProperties[astFile]; ok {
+				for exParamType, properties := range ex {
+					operation.parseProperties4object(
+						&spec.Schema{
+							SchemaProps: spec.SchemaProps{
+								Required:   schema.Required,
+								Properties: properties,
+							},
+						}, exParamType, refType, format,
+					)
+				}
+			}
 			param.Schema = schema
 		}
 	default:
@@ -406,11 +355,113 @@ func (operation *Operation) ParseParamComment(commentLine string, astFile *ast.F
 	return nil
 }
 
+func (operation *Operation) parseProperties4object(schema *spec.Schema, paramType, refType, format string) {
+	var (
+		param spec.Parameter
+		items = schema.Properties.ToOrderedSchemaItems()
+	)
+	for _, item := range items {
+		name, prop := item.Name, &item.Schema
+		if len(prop.Type) == 0 {
+			prop = operation.parser.getUnderlyingSchema(prop)
+			if len(prop.Type) == 0 {
+				continue
+			}
+		}
+
+		nameOverrideType := paramType
+		// query also uses formData tags
+		if paramType == "query" {
+			nameOverrideType = "formData"
+		}
+		// load overridden type specific name from extensions if exists
+		if nameVal, ok := item.Schema.Extensions.GetString(nameOverrideType); ok {
+			name = nameVal
+		}
+
+		switch {
+		case prop.Type[0] == ARRAY:
+			if prop.Items.Schema == nil {
+				continue
+			}
+			itemSchema := prop.Items.Schema
+			if len(itemSchema.Type) == 0 {
+				itemSchema = operation.parser.getUnderlyingSchema(prop.Items.Schema)
+			}
+			if itemSchema == nil {
+				continue
+			}
+			if len(itemSchema.Type) == 0 {
+				continue
+			}
+			if !IsSimplePrimitiveType(itemSchema.Type[0]) {
+				continue
+			}
+			collectionFormat := operation.parser.collectionFormatInQuery
+			if cfv, ok := prop.Extensions.GetString(collectionFormatTag); ok {
+				collectionFormat = cfv
+			}
+			param = createParameter(
+				paramType,
+				prop.Description,
+				name,
+				prop.Type[0],
+				itemSchema.Type[0],
+				format,
+				findInSlice(schema.Required, item.Name),
+				itemSchema.Enum,
+				collectionFormat,
+			)
+
+		case IsSimplePrimitiveType(prop.Type[0]):
+			param = createParameter(
+				paramType,
+				prop.Description,
+				name,
+				PRIMITIVE,
+				prop.Type[0],
+				format,
+				findInSlice(schema.Required, item.Name),
+				nil,
+				operation.parser.collectionFormatInQuery,
+			)
+		default:
+			operation.parser.debug.Printf(
+				"skip field [%s] in %s is not supported type for %s",
+				name,
+				refType,
+				paramType,
+			)
+			continue
+		}
+
+		param.Nullable = prop.Nullable
+		param.Format = prop.Format
+		param.Default = prop.Default
+		param.Example = prop.Example
+		param.Extensions = prop.Extensions
+		param.CommonValidations.Maximum = prop.Maximum
+		param.CommonValidations.Minimum = prop.Minimum
+		param.CommonValidations.ExclusiveMaximum = prop.ExclusiveMaximum
+		param.CommonValidations.ExclusiveMinimum = prop.ExclusiveMinimum
+		param.CommonValidations.MaxLength = prop.MaxLength
+		param.CommonValidations.MinLength = prop.MinLength
+		param.CommonValidations.Pattern = prop.Pattern
+		param.CommonValidations.MaxItems = prop.MaxItems
+		param.CommonValidations.MinItems = prop.MinItems
+		param.CommonValidations.UniqueItems = prop.UniqueItems
+		param.CommonValidations.MultipleOf = prop.MultipleOf
+		param.CommonValidations.Enum = prop.Enum
+		operation.Operation.Parameters = append(operation.Operation.Parameters, param)
+	}
+}
+
 const (
 	formTag             = "form"
 	jsonTag             = "json"
 	uriTag              = "uri"
 	headerTag           = "header"
+	queryTag            = "query"
 	bindingTag          = "binding"
 	defaultTag          = "default"
 	enumsTag            = "enums"
@@ -454,7 +505,10 @@ var regexAttributes = map[string]*regexp.Regexp{
 	schemaExampleTag: regexp.MustCompile(`(?i)\s+schemaExample\(.*\)`),
 }
 
-func (operation *Operation) parseParamAttribute(comment, objectType, schemaType, paramType string, param *spec.Parameter) error {
+func (operation *Operation) parseParamAttribute(
+	comment, objectType, schemaType, paramType string,
+	param *spec.Parameter,
+) error {
 	schemaType = TransToValidSchemeType(schemaType)
 
 	for attrKey, re := range regexAttributes {
@@ -898,19 +952,21 @@ func parseObjectSchema(parser *Parser, refType string, astFile *ast.File) (*spec
 func parseFields(s string) []string {
 	nestLevel := 0
 
-	return strings.FieldsFunc(s, func(char rune) bool {
-		if char == '{' {
-			nestLevel++
+	return strings.FieldsFunc(
+		s, func(char rune) bool {
+			if char == '{' {
+				nestLevel++
 
-			return false
-		} else if char == '}' {
-			nestLevel--
+				return false
+			} else if char == '}' {
+				nestLevel--
 
-			return false
-		}
+				return false
+			}
 
-		return char == ',' && nestLevel == 0
-	})
+			return char == ',' && nestLevel == 0
+		},
+	)
 }
 
 func parseCombinedObjectSchema(parser *Parser, refType string, astFile *ast.File) (*spec.Schema, error) {
@@ -951,15 +1007,20 @@ func parseCombinedObjectSchema(parser *Parser, refType string, astFile *ast.File
 		return schema, nil
 	}
 
-	return spec.ComposedSchema(*schema, spec.Schema{
-		SchemaProps: spec.SchemaProps{
-			Type:       []string{OBJECT},
-			Properties: props,
+	return spec.ComposedSchema(
+		*schema, spec.Schema{
+			SchemaProps: spec.SchemaProps{
+				Type:       []string{OBJECT},
+				Properties: props,
+			},
 		},
-	}), nil
+	), nil
 }
 
-func (operation *Operation) parseAPIObjectSchema(commentLine, schemaType, refType string, astFile *ast.File) (*spec.Schema, error) {
+func (operation *Operation) parseAPIObjectSchema(
+	commentLine, schemaType, refType string,
+	astFile *ast.File,
+) (*spec.Schema, error) {
 	if strings.HasSuffix(refType, ",") && strings.Contains(refType, "[") {
 		// regexp may have broken generic syntax. find closing bracket and add it back
 		allMatchesLenOffset := strings.Index(commentLine, refType) + len(refType)
@@ -1004,7 +1065,12 @@ func (operation *Operation) ParseResponseComment(commentLine string, astFile *as
 
 	description := strings.Trim(matches[4], "\"")
 
-	schema, err := operation.parseAPIObjectSchema(commentLine, strings.Trim(matches[2], "{}"), strings.TrimSpace(matches[3]), astFile)
+	schema, err := operation.parseAPIObjectSchema(
+		commentLine,
+		strings.Trim(matches[2], "{}"),
+		strings.TrimSpace(matches[3]),
+		astFile,
+	)
 	if err != nil {
 		return err
 	}
@@ -1186,7 +1252,13 @@ func (operation *Operation) AddResponse(code int, response *spec.Response) {
 }
 
 // createParameter returns swagger spec.Parameter for given  paramType, description, paramName, schemaType, required.
-func createParameter(paramType, description, paramName, objectType, schemaType string, format string, required bool, enums []interface{}, collectionFormat string) spec.Parameter {
+func createParameter(
+	paramType, description, paramName, objectType, schemaType string,
+	format string,
+	required bool,
+	enums []interface{},
+	collectionFormat string,
+) spec.Parameter {
 	// //five possible parameter types. 	query, path, body, header, form
 	result := spec.Parameter{
 		ParamProps: spec.ParamProps{

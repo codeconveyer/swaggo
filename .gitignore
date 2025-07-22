@@ -7,6 +7,8 @@ testdata/delims/delims.so
 example/basic/docs/*
 example/celler/docs/*
 cover.out
+docs
+cmd/swagtest
 
 
 # Test binary, build with `go test -c`

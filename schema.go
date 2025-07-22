@@ -3,6 +3,7 @@ package swag
 import (
 	"errors"
 	"fmt"
+
 	"github.com/go-openapi/spec"
 )
 
@@ -184,7 +185,7 @@ func IsComplexSchema(schema *spec.Schema) bool {
 		return true
 	}
 
-	//Object included, such as Object or []Object
+	// Object included, such as Object or []Object
 	for _, st := range schema.Type {
 		if st == OBJECT {
 			return true
