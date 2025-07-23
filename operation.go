@@ -326,17 +326,24 @@ func (operation *Operation) ParseParamComment(commentLine string, astFile *ast.F
 			if err != nil {
 				return err
 			}
-			if ex, ok := operation.parser.outputExBodyProperties[astFile]; ok {
-				for exParamType, properties := range ex {
-					operation.parseProperties4object(
-						&spec.Schema{
-							SchemaProps: spec.SchemaProps{
-								Required:   schema.Required,
-								Properties: properties,
-							},
-						}, exParamType, refType, format,
-					)
+			if exI, ok := schema.ExtraProps[exKeyDiffPosition]; ok {
+				delete(schema.ExtraProps, exKeyDiffPosition)
+				ex, ok := exI.(map[string]spec.SchemaProperties)
+				if ok {
+					for exParamType, properties := range ex {
+						operation.parseProperties4object(
+							&spec.Schema{
+								SchemaProps: spec.SchemaProps{
+									Required:   schema.Required,
+									Properties: properties,
+								},
+							}, exParamType, refType, format,
+						)
+					}
 				}
+			}
+			if _, ok := schema.ExtraProps[exKeyEmptyProperty]; ok {
+				return nil
 			}
 			param.Schema = schema
 		}

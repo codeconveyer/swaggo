@@ -24,6 +24,11 @@ import (
 )
 
 const (
+	exKeyDiffPosition  = "position"
+	exKeyEmptyProperty = "empty_property"
+)
+
+const (
 	// CamelCase indicates using CamelCase strategy for struct field.
 	CamelCase = "camelcase"
 
@@ -121,9 +126,6 @@ type Parser struct {
 
 	// outputSchemas store schemas which will be export to swagger
 	outputSchemas map[*TypeSpecDef]*Schema
-
-	// outputExBodyProperties store body properties which will be export to swagger but not in body
-	outputExBodyProperties map[*ast.File]map[string]spec.SchemaProperties
 
 	// PropNamingStrategy naming strategy
 	PropNamingStrategy string
@@ -235,15 +237,14 @@ func New(options ...func(*Parser)) *Parser {
 				Extensions: nil,
 			},
 		},
-		packages:               NewPackagesDefinitions(),
-		debug:                  log.New(os.Stdout, "", log.LstdFlags),
-		parsedSchemas:          make(map[*TypeSpecDef]*Schema),
-		outputSchemas:          make(map[*TypeSpecDef]*Schema),
-		outputExBodyProperties: make(map[*ast.File]map[string]spec.SchemaProperties),
-		excludes:               make(map[string]struct{}),
-		tags:                   make(map[string]struct{}),
-		fieldParserFactory:     newTagBaseFieldParser,
-		Overrides:              make(map[string]string),
+		packages:           NewPackagesDefinitions(),
+		debug:              log.New(os.Stdout, "", log.LstdFlags),
+		parsedSchemas:      make(map[*TypeSpecDef]*Schema),
+		outputSchemas:      make(map[*TypeSpecDef]*Schema),
+		excludes:           make(map[string]struct{}),
+		tags:               make(map[string]struct{}),
+		fieldParserFactory: newTagBaseFieldParser,
+		Overrides:          make(map[string]string),
 	}
 
 	for _, option := range options {
@@ -1302,7 +1303,8 @@ func (parser *Parser) getTypeSchema(typeName string, file *ast.File, ref bool) (
 }
 
 func (parser *Parser) getRefTypeSchema(typeSpecDef *TypeSpecDef, schema *Schema) *spec.Schema {
-	_, ok := parser.outputSchemas[typeSpecDef]
+	old, ok := parser.outputSchemas[typeSpecDef]
+	var extraProps map[string]any
 	if !ok {
 		parser.swagger.Definitions[schema.Name] = spec.Schema{}
 
@@ -1327,14 +1329,26 @@ func (parser *Parser) getRefTypeSchema(typeSpecDef *TypeSpecDef, schema *Schema)
 				}
 			}
 			newSchema.Properties = properties
-			parser.outputExBodyProperties[typeSpecDef.File] = exProperties
 			parser.swagger.Definitions[schema.Name] = newSchema
+			if len(exProperties) > 0 {
+				extraProps = map[string]any{exKeyDiffPosition: exProperties}
+			}
+			if len(properties) == 0 {
+				if extraProps == nil {
+					extraProps = map[string]any{exKeyEmptyProperty: struct{}{}}
+				} else {
+					extraProps[exKeyEmptyProperty] = struct{}{}
+				}
+			}
+			schema.Schema = &newSchema
 		}
-
 		parser.outputSchemas[typeSpecDef] = schema
+	} else {
+		extraProps = old.ExtraProps
 	}
 
 	refSchema := RefSchema(schema.Name)
+	refSchema.ExtraProps = extraProps
 
 	return refSchema
 }
